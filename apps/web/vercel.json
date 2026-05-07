@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
-  "installCommand": "set -e; echo '[1] install pnpm'; npm install -g pnpm@11.0.5; echo '[2] pnpm version'; pnpm --version; echo '[3] ls workspace root'; ls -la /vercel/path0; echo '[4] pnpm install'; pnpm install --reporter=default",
+  "installCommand": "npm install -g pnpm@11.0.5 && pnpm install --frozen-lockfile",
   "buildCommand": "next build"
 }
