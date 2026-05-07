@@ -11,5 +11,12 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "msw",
+      "sharp",
+      "unrs-resolver"
+    ]
   }
 }
