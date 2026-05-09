@@ -30,9 +30,11 @@ from .schemas import (
 )
 
 app = FastAPI(title="TradePass Engine", version="0.1.0")
+_settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=get_settings().cors_origin_list,
+    allow_origins=_settings.cors_origin_list,
+    allow_origin_regex=_settings.cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
