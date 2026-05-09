@@ -1,9 +1,24 @@
 [project]
 name = "api"
 version = "0.1.0"
-description = "Add your description here"
+description = "TradePass / SparkyPass engine — SM-2, sessions, readiness."
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.136.1",
-    "uvicorn>=0.46.0",
+    "uvicorn[standard]>=0.46.0",
+    "supabase>=2.10.0",
+    "pydantic-settings>=2.6.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "httpx>=0.28",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]

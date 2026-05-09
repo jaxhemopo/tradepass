@@ -54,6 +54,9 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 
+# Seed data (contains test PII, never commit)
+pipeline/seed/
+
 # Editors
 .vscode/
 .idea/
