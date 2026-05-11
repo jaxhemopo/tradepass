@@ -167,7 +167,7 @@ export default function StudyClient({ token }: { token: string }) {
             <p className="text-sm font-semibold">Before we reveal — how confident are you?</p>
             <div className="mt-3 flex gap-2">
               <Button variant="outline" className="flex-1" onClick={() => rate(false)}>
-                Wasn't sure
+                Wasn&apos;t sure
               </Button>
               <Button className="flex-1" onClick={() => rate(true)}>
                 Knew it
