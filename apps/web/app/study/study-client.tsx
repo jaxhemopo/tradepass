@@ -130,11 +130,15 @@ export default function StudyClient({ token }: { token: string }) {
         </div>
 
         <div className="flex flex-col gap-2">
-          {current.options.map((opt) => {
+          {current.options.map((opt, idx) => {
             const isPicked = pickedId === opt.id;
             const isCorrect = correctId === opt.id;
             const showCorrect = revealed && isCorrect;
             const showWrong = revealed && isPicked && !isCorrect;
+            // Visible label comes from array position so options A/B/C/D
+            // always appear in order on screen, even though the engine
+            // shuffled the underlying option ids per session.
+            const visibleLabel = String.fromCharCode(65 + idx);
             return (
               <button
                 type="button"
@@ -153,9 +157,7 @@ export default function StudyClient({ token }: { token: string }) {
                           : ""
                 }`}
               >
-                <span className="font-mono text-xs text-muted-foreground">
-                  {opt.id.toUpperCase()}.{" "}
-                </span>
+                <span className="font-mono text-xs text-muted-foreground">{visibleLabel}. </span>
                 {opt.text}
               </button>
             );

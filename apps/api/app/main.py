@@ -10,6 +10,7 @@ All endpoints require an Authorization: Bearer <supabase-jwt> header.
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -110,6 +111,18 @@ def start_session(
     )
     session_id = session_resp.data[0]["id"]
 
+    def shuffled(opts: list[dict]) -> list[dict]:
+        # Source data has the correct answer at position 0 every time; without
+        # this, the UI would always show "A" as correct and the SRS becomes
+        # useless. We preserve each option's original id (a/b/c/d) so the
+        # review endpoint can still match picked_option_id to correct_answer —
+        # the client renders the visible label from array index instead.
+        shuffled_opts = list(opts)
+        for i in range(len(shuffled_opts) - 1, 0, -1):
+            j = secrets.randbelow(i + 1)
+            shuffled_opts[i], shuffled_opts[j] = shuffled_opts[j], shuffled_opts[i]
+        return shuffled_opts
+
     return StartSessionResponse(
         session_id=session_id,
         questions=[
@@ -117,7 +130,7 @@ def start_session(
                 id=q["id"],
                 topic_slug=(q.get("topics") or {}).get("slug", ""),
                 body=q["body"],
-                options=[Option(**o) for o in q["options"]],
+                options=[Option(**o) for o in shuffled(q["options"])],
                 difficulty=q.get("difficulty"),
             )
             for q in questions
