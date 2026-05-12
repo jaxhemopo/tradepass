@@ -65,7 +65,12 @@ def question_uuid(legacy_id: str) -> uuid.UUID:
 def transform_options(raw: str | None) -> list[dict[str, str]]:
     if not raw:
         return []
-    items = json.loads(raw)
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError:
+        # Some legacy rows were stored with `\\"` (over-escaped) where JSON
+        # expects `\"`. Drop the extra backslash and retry.
+        items = json.loads(raw.replace('\\\\"', '\\"'))
     return [{"id": OPTION_IDS[i], "text": str(text)} for i, text in enumerate(items)]
 
 
