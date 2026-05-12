@@ -6,6 +6,11 @@ Endpoints (all under /v1):
     GET  /readiness          — weighted exam readiness % across all topics
 
 All endpoints require an Authorization: Bearer <supabase-jwt> header.
+
+Handles three question_types:
+    single_choice    correct_answer=["a"],         options=[{id,text}]
+    multiple_select  correct_answer=["a","c"],     options=[{id,text}]
+    exact_value      correct_answer={answers,...}, options=NULL
 """
 
 from __future__ import annotations
@@ -14,16 +19,14 @@ import logging
 import secrets
 import traceback
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from . import sm2
+from . import answers, sm2
 from .config import get_settings
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger("tradepass.engine")
 from .deps import AuthedUser, authed_user
 from .schemas import (
     Option,
@@ -36,7 +39,13 @@ from .schemas import (
     TopicReadiness,
 )
 
-app = FastAPI(title="TradePass Engine", version="0.1.0")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("tradepass.engine")
+
+ADVANCED_TYPES = {"multiple_select", "exact_value"}
+ADVANCED_FLOOR_BY_MODE = {"study": 2, "mock_exam": 6, "diagnostic": 1}
+
+app = FastAPI(title="TradePass Engine", version="0.2.0")
 _settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
@@ -50,16 +59,58 @@ app.add_middleware(
 
 @app.exception_handler(Exception)
 async def unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
-    # Without this, an unhandled exception bypasses CORSMiddleware in some
-    # Starlette versions and the browser sees a CORS error instead of the
-    # real 500. Logging the traceback also makes Railway logs actionable.
-    logger.error("unhandled %s on %s %s\n%s", type(exc).__name__, request.method, request.url.path, traceback.format_exc())
-    return JSONResponse(status_code=500, content={"detail": f"server error: {type(exc).__name__}: {exc}"})
+    logger.error(
+        "unhandled %s on %s %s\n%s",
+        type(exc).__name__,
+        request.method,
+        request.url.path,
+        traceback.format_exc(),
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"server error: {type(exc).__name__}: {exc}"},
+    )
 
 
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+QUESTION_SELECT = "id, body, options, difficulty, question_type, correct_answer, topics(slug)"
+
+
+def _shuffled(opts: list[dict]) -> list[dict]:
+    out = list(opts)
+    for i in range(len(out) - 1, 0, -1):
+        j = secrets.randbelow(i + 1)
+        out[i], out[j] = out[j], out[i]
+    return out
+
+
+def _to_study_question(q: dict[str, Any]) -> StudyQuestion:
+    qtype = q.get("question_type") or "single_choice"
+    raw_options = q.get("options") if qtype != "exact_value" else None
+    options_payload: list[Option] | None = None
+    if raw_options:
+        options_payload = [Option(**o) for o in _shuffled(raw_options)]
+    unit = None
+    if qtype == "exact_value":
+        correct = q.get("correct_answer") or {}
+        if isinstance(correct, dict):
+            unit = correct.get("unit")
+    return StudyQuestion(
+        id=q["id"],
+        topic_slug=(q.get("topics") or {}).get("slug", ""),
+        question_type=qtype,
+        body=q["body"],
+        options=options_payload,
+        difficulty=q.get("difficulty"),
+        unit=unit,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +123,8 @@ def start_session(
 ) -> StartSessionResponse:
     sb = user.client
     now_iso = datetime.now(timezone.utc).isoformat()
+    limit = body.limit
+    floor = ADVANCED_FLOOR_BY_MODE.get(body.mode, 0)
 
     due_state = (
         sb.table("sm2_state")
@@ -79,44 +132,74 @@ def start_session(
         .eq("user_id", user.id)
         .lte("due_date", now_iso)
         .order("due_date")
-        .limit(body.limit)
+        .limit(limit)
         .execute()
     )
     due_question_ids = [row["question_id"] for row in (due_state.data or [])]
 
-    questions: list[dict] = []
+    picked_ids: list[str] = []
+    picked_rows: list[dict] = []
     if due_question_ids:
         q_resp = (
             sb.table("questions")
-            .select("id, body, options, difficulty, topics(slug)")
+            .select(QUESTION_SELECT)
             .in_("id", due_question_ids)
             .execute()
         )
-        questions = q_resp.data or []
+        for row in q_resp.data or []:
+            picked_rows.append(row)
+            picked_ids.append(row["id"])
 
-    if len(questions) < body.limit:
-        seen_ids = (
-            sb.table("sm2_state")
-            .select("question_id")
-            .eq("user_id", user.id)
+    seen_resp = (
+        sb.table("sm2_state")
+        .select("question_id")
+        .eq("user_id", user.id)
+        .execute()
+    )
+    seen_ids = {r["question_id"] for r in (seen_resp.data or [])}
+
+    def in_session(qid: str) -> bool:
+        return qid in picked_ids
+
+    advanced_count = sum(1 for r in picked_rows if r.get("question_type") in ADVANCED_TYPES)
+    if advanced_count < floor and len(picked_rows) < limit:
+        gap = min(floor - advanced_count, limit - len(picked_rows))
+        adv_resp = (
+            sb.table("questions")
+            .select(QUESTION_SELECT)
+            .in_("question_type", list(ADVANCED_TYPES))
+            .limit(max(gap * 4, gap))
             .execute()
         )
-        seen_set = {r["question_id"] for r in (seen_ids.data or [])}
-        gap = body.limit - len(questions)
-        new_q_resp = (
+        # Prefer cards the user hasn't seen yet, then any.
+        unseen = [r for r in (adv_resp.data or []) if r["id"] not in seen_ids and not in_session(r["id"])]
+        fallback = [r for r in (adv_resp.data or []) if r["id"] in seen_ids and not in_session(r["id"])]
+        for row in unseen + fallback:
+            picked_rows.append(row)
+            picked_ids.append(row["id"])
+            if len(picked_rows) >= limit:
+                break
+            advanced_count += 1
+            if advanced_count >= floor:
+                break
+
+    if len(picked_rows) < limit:
+        gap = limit - len(picked_rows)
+        new_resp = (
             sb.table("questions")
-            .select("id, body, options, difficulty, topics(slug)")
+            .select(QUESTION_SELECT)
             .limit(gap * 4)
             .execute()
         )
-        for row in new_q_resp.data or []:
-            if row["id"] in seen_set or any(q["id"] == row["id"] for q in questions):
+        for row in new_resp.data or []:
+            if row["id"] in seen_ids or in_session(row["id"]):
                 continue
-            questions.append(row)
-            if len(questions) >= body.limit:
+            picked_rows.append(row)
+            picked_ids.append(row["id"])
+            if len(picked_rows) >= limit:
                 break
 
-    if not questions:
+    if not picked_rows:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no questions available")
 
     session_resp = (
@@ -126,35 +209,14 @@ def start_session(
     )
     session_id = session_resp.data[0]["id"]
 
-    def shuffled(opts: list[dict]) -> list[dict]:
-        # Source data has the correct answer at position 0 every time; without
-        # this, the UI would always show "A" as correct and the SRS becomes
-        # useless. We preserve each option's original id (a/b/c/d) so the
-        # review endpoint can still match picked_option_id to correct_answer —
-        # the client renders the visible label from array index instead.
-        shuffled_opts = list(opts)
-        for i in range(len(shuffled_opts) - 1, 0, -1):
-            j = secrets.randbelow(i + 1)
-            shuffled_opts[i], shuffled_opts[j] = shuffled_opts[j], shuffled_opts[i]
-        return shuffled_opts
-
     return StartSessionResponse(
         session_id=session_id,
-        questions=[
-            StudyQuestion(
-                id=q["id"],
-                topic_slug=(q.get("topics") or {}).get("slug", ""),
-                body=q["body"],
-                options=[Option(**o) for o in shuffled(q["options"])],
-                difficulty=q.get("difficulty"),
-            )
-            for q in questions
-        ],
+        questions=[_to_study_question(q) for q in picked_rows],
     )
 
 
 # ---------------------------------------------------------------------------
-# Review (record attempt + advance SM-2)
+# Review
 # ---------------------------------------------------------------------------
 @app.post("/v1/reviews", response_model=ReviewResponse)
 def post_review(
@@ -165,16 +227,17 @@ def post_review(
 
     q_resp = (
         sb.table("questions")
-        .select("id, correct_answer")
+        .select("id, question_type, correct_answer")
         .eq("id", body.question_id)
         .single()
         .execute()
     )
     if not q_resp.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "question not found")
-    correct_answer = q_resp.data["correct_answer"]
-    answered_correct = body.picked_option_id == correct_answer
+    qtype = q_resp.data["question_type"]
+    correct = q_resp.data["correct_answer"]
 
+    answered_correct = answers.is_correct(qtype, body.picked_answer, correct)
     quality = sm2.derive_quality(
         answered_correct=answered_correct,
         rated_knew_it=body.rated_knew_it,
@@ -187,6 +250,7 @@ def post_review(
         "answered_correct": answered_correct,
         "time_taken_seconds": body.time_taken_seconds,
         "rated_knew_it": body.rated_knew_it,
+        "picked_answer": body.picked_answer,
     }).execute()
 
     prev_resp = (
@@ -223,7 +287,7 @@ def post_review(
     }).execute()
 
     return ReviewResponse(
-        correct_answer=correct_answer,
+        correct_answer=correct,
         answered_correct=answered_correct,
         quality=quality,
         repetitions=nxt.repetitions,

@@ -1,13 +1,17 @@
 import { env } from "@/lib/env";
 
+export type QuestionType = "single_choice" | "multiple_select" | "exact_value";
+
 export type Option = { id: string; text: string };
 
 export type StudyQuestion = {
   id: string;
   topic_slug: string;
+  question_type: QuestionType;
   body: string;
-  options: Option[];
+  options: Option[] | null;
   difficulty: number | null;
+  unit?: string | null;
 };
 
 export type StartSessionResponse = {
@@ -15,8 +19,12 @@ export type StartSessionResponse = {
   questions: StudyQuestion[];
 };
 
+export type ExactValueAnswer = { answers: string[]; unit?: string; tolerance: number };
+
 export type ReviewResponse = {
-  correct_answer: string;
+  // single_choice / multiple_select: string[]
+  // exact_value: ExactValueAnswer
+  correct_answer: string[] | ExactValueAnswer;
   answered_correct: boolean;
   quality: number;
   repetitions: number;
@@ -76,7 +84,10 @@ export const engine = {
     body: {
       question_id: string;
       session_id?: string;
-      picked_option_id: string;
+      // single_choice: option id ("a")
+      // multiple_select: option ids (["a","c"])
+      // exact_value: raw typed value ("11.5")
+      picked_answer: string | string[];
       rated_knew_it: boolean;
       time_taken_seconds: number;
     },

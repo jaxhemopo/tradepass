@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
+
+QuestionType = str  # 'single_choice' | 'multiple_select' | 'exact_value'
 
 
 class Option(BaseModel):
@@ -13,9 +16,12 @@ class Option(BaseModel):
 class StudyQuestion(BaseModel):
     id: str
     topic_slug: str
+    question_type: QuestionType
     body: str
-    options: list[Option]
+    options: list[Option] | None = None
     difficulty: int | None = None
+    # exact_value only: surfaced as a display hint next to the input box.
+    unit: str | None = None
 
 
 class StartSessionRequest(BaseModel):
@@ -31,13 +37,20 @@ class StartSessionResponse(BaseModel):
 class ReviewRequest(BaseModel):
     question_id: str
     session_id: str | None = None
-    picked_option_id: str
+    # Shape varies by question_type:
+    #   single_choice    -> str (option id, e.g. "a")
+    #   multiple_select  -> list[str] (option ids, e.g. ["a","c"])
+    #   exact_value      -> str (raw typed value, e.g. "11.5")
+    picked_answer: str | list[str]
     rated_knew_it: bool
     time_taken_seconds: int = Field(ge=0, le=3600)
 
 
 class ReviewResponse(BaseModel):
-    correct_answer: str
+    # Shape varies by question_type — for the client to render the reveal:
+    #   single_choice / multiple_select -> list[str] (correct option ids)
+    #   exact_value                     -> dict {answers, unit, tolerance}
+    correct_answer: Any
     answered_correct: bool
     quality: int
     repetitions: int

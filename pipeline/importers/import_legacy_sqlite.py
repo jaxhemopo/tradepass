@@ -14,14 +14,17 @@ Run from repo root:
 - Reads pipeline/seed/tradepass-legacy.db
 - Connects to Supabase via DATABASE_URL in .env.local at repo root
 - Generates deterministic uuid5 IDs so re-runs are idempotent (upsert)
-- Skips legacy users / progress / sessions / etc — content only
 - All topics imported under brand_scope='nz-sparky'
+
+Handles three question_types per pipeline/SCHEMA_CONVENTIONS.md:
+  single_choice    options=[{id,text}], correct_answer=["a"]
+  multiple_select  options=[{id,text}], correct_answer=["a","c"]
+  exact_value      options=NULL,        correct_answer={answers,unit,tolerance}
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import sys
 import uuid
@@ -33,12 +36,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LEGACY_DB = REPO_ROOT / "pipeline" / "seed" / "tradepass-legacy.db"
 ENV_FILE = REPO_ROOT / ".env.local"
 
-# Stable namespace so uuid5(legacy_id) is reproducible across runs.
 LEGACY_NS = uuid.UUID("a3c5b8e9-0001-5678-90ab-cdef12345678")
 BRAND_SCOPE = "nz-sparky"
 
 DIFFICULTY_MAP = {"easy": 2, "medium": 3, "hard": 4}
 OPTION_IDS = ["a", "b", "c", "d", "e", "f"]
+ALLOWED_TYPES = {"single_choice", "multiple_select", "exact_value"}
 
 
 def load_database_url() -> str:
@@ -62,22 +65,78 @@ def question_uuid(legacy_id: str) -> uuid.UUID:
     return uuid.uuid5(LEGACY_NS, f"question:{legacy_id}")
 
 
-def transform_options(raw: str | None) -> list[dict[str, str]]:
+def parse_options_json(raw: str | None) -> list[str]:
     if not raw:
         return []
     try:
         items = json.loads(raw)
     except json.JSONDecodeError:
-        # Some legacy rows were stored with `\\"` (over-escaped) where JSON
-        # expects `\"`. Drop the extra backslash and retry.
         items = json.loads(raw.replace('\\\\"', '\\"'))
-    return [{"id": OPTION_IDS[i], "text": str(text)} for i, text in enumerate(items)]
+    out: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            out.append(item)
+        elif isinstance(item, dict) and "text" in item:
+            out.append(str(item["text"]))
+        else:
+            raise ValueError(f"unrecognised option shape: {item!r}")
+    return out
 
 
-def correct_answer_letter(idx: int | None) -> str | None:
-    if idx is None or idx < 0 or idx >= len(OPTION_IDS):
+def to_option_objects(texts: list[str]) -> list[dict[str, str]]:
+    return [{"id": OPTION_IDS[i], "text": t} for i, t in enumerate(texts)]
+
+
+def parse_correct_answer(
+    raw: str | None,
+    legacy_index: int | None,
+    qtype: str,
+    n_options: int,
+    answer_text: str,
+    option_texts: list[str],
+) -> dict | list[str] | None:
+    """Translate the SQLite-stored correct_answer into Supabase's jsonb format."""
+    if qtype == "exact_value":
+        if not raw:
+            return None
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict) or "answers" not in parsed:
+            return None
+        return parsed
+
+    indices: list[int] | None = None
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list) and all(isinstance(x, int) for x in parsed):
+            indices = parsed
+        elif isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+            # Already id-form (e.g. ["a","c"]); accept as-is.
+            return parsed
+
+    if indices is None and legacy_index is not None and isinstance(legacy_index, int):
+        indices = [legacy_index]
+
+    if indices is None:
+        # Final fallback: match answer_text against options[0].
+        stripped = (answer_text or "").strip()
+        for i, t in enumerate(option_texts):
+            if t.strip() == stripped:
+                indices = [i]
+                break
+
+    if indices is None:
         return None
-    return OPTION_IDS[idx]
+
+    ids: list[str] = []
+    for i in indices:
+        if 0 <= i < n_options:
+            ids.append(OPTION_IDS[i])
+        else:
+            return None
+    return ids
 
 
 def main() -> None:
@@ -88,13 +147,18 @@ def main() -> None:
     src = sqlite3.connect(LEGACY_DB)
     src.row_factory = sqlite3.Row
 
+    has_qtype = any(r["name"] == "question_type" for r in src.execute("pragma table_info(questions)"))
+    has_ca = any(r["name"] == "correct_answer" for r in src.execute("pragma table_info(questions)"))
+    if not (has_qtype and has_ca):
+        sys.exit("SQLite source missing question_type / correct_answer columns — run schema upgrade first")
+
     legacy_topics = src.execute(
         "select id, name, slug, weight from topics order by id"
     ).fetchall()
     legacy_questions = src.execute(
         """
         select id, topic_id, question_text, answer_text, options, correct_answer_index,
-               explanation, reference_clause, difficulty
+               correct_answer, question_type, explanation, reference_clause, difficulty
         from questions
         where is_active = 1
         order by id
@@ -123,31 +187,56 @@ def main() -> None:
         if slug is None:
             skipped.append((row["id"], f"unknown topic_id={row['topic_id']}"))
             continue
-        options = transform_options(row["options"])
-        if not options:
-            skipped.append((row["id"], "no options"))
+
+        qtype = (row["question_type"] or "single_choice").strip()
+        if qtype not in ALLOWED_TYPES:
+            skipped.append((row["id"], f"unknown question_type={qtype!r}"))
             continue
-        idx = row["correct_answer_index"]
-        if idx is None or (isinstance(idx, str) and idx.strip() == ""):
-            answer_text = (row["answer_text"] or "").strip()
-            for i, opt in enumerate(options):
-                if opt["text"].strip() == answer_text:
-                    idx = i
-                    break
-        correct = correct_answer_letter(idx if isinstance(idx, int) else None)
-        if correct is None or correct not in {o["id"] for o in options}:
-            skipped.append((row["id"], f"could not resolve correct answer (idx={row['correct_answer_index']!r})"))
-            continue
+
+        option_texts = parse_options_json(row["options"])
+
+        if qtype == "exact_value":
+            options_payload = None
+            correct = parse_correct_answer(
+                row["correct_answer"], None, qtype, 0, "", []
+            )
+            if not isinstance(correct, dict) or "answers" not in correct:
+                skipped.append((row["id"], "exact_value missing answers object"))
+                continue
+        else:
+            if not option_texts:
+                skipped.append((row["id"], "choice question has no options"))
+                continue
+            options_payload = to_option_objects(option_texts)
+            correct = parse_correct_answer(
+                row["correct_answer"],
+                row["correct_answer_index"] if isinstance(row["correct_answer_index"], int) else None,
+                qtype,
+                len(option_texts),
+                row["answer_text"] or "",
+                option_texts,
+            )
+            if not isinstance(correct, list) or not correct:
+                skipped.append((row["id"], "could not resolve correct option(s)"))
+                continue
+            if qtype == "single_choice" and len(correct) != 1:
+                skipped.append((row["id"], f"single_choice needs exactly 1 correct, got {len(correct)}"))
+                continue
+            if qtype == "multiple_select" and len(correct) < 2:
+                skipped.append((row["id"], f"multiple_select needs ≥2 correct, got {len(correct)}"))
+                continue
+
         difficulty = DIFFICULTY_MAP.get((row["difficulty"] or "medium").lower(), 3)
         question_rows.append((
             str(question_uuid(row["id"])),
             str(topic_uuid(slug)),
             row["question_text"],
-            json.dumps(options),
-            correct,
+            json.dumps(options_payload) if options_payload is not None else None,
+            json.dumps(correct, ensure_ascii=False),
             row["explanation"],
             row["reference_clause"],
             difficulty,
+            qtype,
         ))
 
     with psycopg.connect(db_url) as conn, conn.cursor() as cur:
@@ -164,8 +253,9 @@ def main() -> None:
         cur.executemany(
             """
             insert into public.questions
-                (id, topic_id, body, options, correct_answer, explanation, regulation_clause, difficulty)
-            values (%s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+                (id, topic_id, body, options, correct_answer, explanation,
+                 regulation_clause, difficulty, question_type)
+            values (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s)
             on conflict (id) do update set
                 topic_id = excluded.topic_id,
                 body = excluded.body,
@@ -173,13 +263,19 @@ def main() -> None:
                 correct_answer = excluded.correct_answer,
                 explanation = excluded.explanation,
                 regulation_clause = excluded.regulation_clause,
-                difficulty = excluded.difficulty
+                difficulty = excluded.difficulty,
+                question_type = excluded.question_type
             """,
             question_rows,
         )
         conn.commit()
 
+    by_type: dict[str, int] = {}
+    for r in question_rows:
+        by_type[r[8]] = by_type.get(r[8], 0) + 1
+
     print(f"imported: {len(topic_rows)} topics, {len(question_rows)} questions")
+    print(f"  by type: {', '.join(f'{k}={v}' for k, v in sorted(by_type.items()))}")
     if skipped:
         print(f"skipped {len(skipped)} questions:")
         for qid, reason in skipped:
