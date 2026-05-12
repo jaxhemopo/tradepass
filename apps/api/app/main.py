@@ -10,14 +10,20 @@ All endpoints require an Authorization: Bearer <supabase-jwt> header.
 
 from __future__ import annotations
 
+import logging
 import secrets
+import traceback
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from . import sm2
 from .config import get_settings
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("tradepass.engine")
 from .deps import AuthedUser, authed_user
 from .schemas import (
     Option,
@@ -40,6 +46,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+    # Without this, an unhandled exception bypasses CORSMiddleware in some
+    # Starlette versions and the browser sees a CORS error instead of the
+    # real 500. Logging the traceback also makes Railway logs actionable.
+    logger.error("unhandled %s on %s %s\n%s", type(exc).__name__, request.method, request.url.path, traceback.format_exc())
+    return JSONResponse(status_code=500, content={"detail": f"server error: {type(exc).__name__}: {exc}"})
 
 
 @app.get("/healthz")
