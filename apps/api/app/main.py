@@ -277,7 +277,7 @@ def post_review(
 
     q_resp = (
         sb.table("questions")
-        .select("id, question_type, correct_answer")
+        .select("id, question_type, correct_answer, explanation, regulation_clause")
         .eq("id", body.question_id)
         .single()
         .execute()
@@ -286,6 +286,8 @@ def post_review(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "question not found")
     qtype = q_resp.data["question_type"]
     correct = q_resp.data["correct_answer"]
+    explanation = q_resp.data.get("explanation")
+    regulation_clause = q_resp.data.get("regulation_clause")
 
     answered_correct = answers.is_correct(qtype, body.picked_answer, correct)
     quality = sm2.derive_quality(
@@ -343,6 +345,8 @@ def post_review(
         repetitions=nxt.repetitions,
         interval_days=nxt.interval_days,
         due_date=nxt.due_date,
+        explanation=explanation,
+        regulation_clause=regulation_clause,
     )
 
 

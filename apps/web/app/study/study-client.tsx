@@ -13,6 +13,12 @@ import {
 
 type Picked = string | string[];
 
+type Miss = {
+  question: StudyQuestion;
+  picked: Picked;
+  review: ReviewResponse;
+};
+
 type Phase =
   | { kind: "loading" }
   | { kind: "error"; message: string }
@@ -29,6 +35,9 @@ export default function StudyClient({ token }: { token: string }) {
   const [correctCount, setCorrectCount] = useState(0);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [showMultiTooltip, setShowMultiTooltip] = useState(false);
+  // Misses accumulate only in component state — they vanish on page exit by
+  // design, so the learner can't return to a static answer key.
+  const [misses, setMisses] = useState<Miss[]>([]);
 
   // Per-question working state while answering. Reset on next().
   const [singlePick, setSinglePick] = useState<string | null>(null);
@@ -121,6 +130,7 @@ export default function StudyClient({ token }: { token: string }) {
         time_taken_seconds: elapsed,
       });
       if (review.answered_correct) setCorrectCount((c) => c + 1);
+      else setMisses((prev) => [...prev, { question: current, picked, review }]);
       setPhase({ kind: "revealed", picked, review });
     } catch (e) {
       setPhase({ kind: "error", message: String(e) });
@@ -153,16 +163,25 @@ export default function StudyClient({ token }: { token: string }) {
     );
   }
   if (phase.kind === "done" || !current || !session) {
+    if (misses.length === 0) {
+      return (
+        <Center>
+          <p className="text-2xl font-semibold">Session complete</p>
+          <p className="mt-1 text-muted-foreground">
+            {correctCount} / {session?.questions.length ?? 0} correct — clean sheet.
+          </p>
+          <Link href="/dashboard" className="mt-6">
+            <Button>Back to dashboard</Button>
+          </Link>
+        </Center>
+      );
+    }
     return (
-      <Center>
-        <p className="text-2xl font-semibold">Session complete</p>
-        <p className="mt-1 text-muted-foreground">
-          {correctCount} / {session?.questions.length ?? 0} correct
-        </p>
-        <Link href="/dashboard" className="mt-6">
-          <Button>Back to dashboard</Button>
-        </Link>
-      </Center>
+      <RecapView
+        total={session?.questions.length ?? 0}
+        correctCount={correctCount}
+        misses={misses}
+      />
     );
   }
 
@@ -516,6 +535,130 @@ function correctIdsFor(
   if (!correct) return [];
   if (question.question_type === "exact_value") return [];
   return Array.isArray(correct) ? correct : [];
+}
+
+function RecapView({
+  total,
+  correctCount,
+  misses,
+}: {
+  total: number;
+  correctCount: number;
+  misses: Miss[];
+}) {
+  return (
+    <main className="flex min-h-screen flex-col items-center p-6">
+      <div className="flex w-full max-w-2xl flex-col gap-5">
+        <header className="flex flex-col gap-1">
+          <h1 className="text-2xl font-semibold">Session recap</h1>
+          <p className="text-sm text-muted-foreground">
+            {correctCount} of {total} correct ·{" "}
+            <span className="font-medium text-foreground">{misses.length} to learn</span>
+          </p>
+        </header>
+
+        <div className="rounded-lg border-2 border-amber-300 bg-amber-50 p-4">
+          <p className="text-sm font-semibold text-amber-900">Read these now — once</p>
+          <p className="mt-1 text-xs text-amber-900/80">
+            This page is shown only at the end of each session and disappears when you leave. Take
+            your time; you won&apos;t see this recap again unless you miss the same questions in a
+            future session.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-4">
+          {misses.map((miss, i) => (
+            <RecapCard key={miss.question.id} number={i + 1} miss={miss} />
+          ))}
+        </div>
+
+        <Link href="/dashboard" className="w-full">
+          <Button className="w-full">Back to dashboard</Button>
+        </Link>
+      </div>
+    </main>
+  );
+}
+
+function RecapCard({ number, miss }: { number: number; miss: Miss }) {
+  const { question, picked, review } = miss;
+  const isExact = question.question_type === "exact_value";
+  const exactCorrect =
+    isExact && !Array.isArray(review.correct_answer)
+      ? (review.correct_answer as ExactValueAnswer)
+      : null;
+  const correctIds = !isExact && Array.isArray(review.correct_answer) ? review.correct_answer : [];
+  const pickedSet = Array.isArray(picked) ? new Set(picked) : new Set([picked]);
+
+  return (
+    <article className="rounded-lg border p-5">
+      <div className="flex items-baseline justify-between text-xs text-muted-foreground">
+        <span>
+          #{number} · {question.topic_slug}
+        </span>
+        <span className="uppercase tracking-wide">{question.question_type.replace("_", " ")}</span>
+      </div>
+      <p className="mt-2 text-base leading-snug">{question.body}</p>
+
+      {!isExact && question.options && (
+        <ul className="mt-4 space-y-1.5 text-sm">
+          {question.options.map((opt, idx) => {
+            const label = String.fromCharCode(65 + idx);
+            const wasCorrect = correctIds.includes(opt.id);
+            const wasPicked = pickedSet.has(opt.id);
+            const tone = wasCorrect
+              ? "text-green-700"
+              : wasPicked
+                ? "text-red-700 line-through"
+                : "text-muted-foreground";
+            const marker = wasCorrect ? "✓" : wasPicked ? "✗" : " ";
+            return (
+              <li key={opt.id} className={`flex items-start gap-2 ${tone}`}>
+                <span className="font-mono w-4 text-center">{marker}</span>
+                <span>
+                  <span className="font-mono text-xs">{label}.</span> {opt.text}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {isExact && exactCorrect && (
+        <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+          <div className="rounded-md border border-red-200 bg-red-50 p-3">
+            <p className="text-xs uppercase tracking-wide text-red-700">You typed</p>
+            <p className="mt-1 font-mono text-base text-red-900">
+              {typeof picked === "string" ? picked : "—"}
+            </p>
+          </div>
+          <div className="rounded-md border border-green-200 bg-green-50 p-3">
+            <p className="text-xs uppercase tracking-wide text-green-700">Accepted</p>
+            <p className="mt-1 font-mono text-base text-green-900">
+              {exactCorrect.answers.join(" / ")}
+              {exactCorrect.unit ? ` ${exactCorrect.unit}` : ""}
+            </p>
+            {exactCorrect.tolerance > 0 && (
+              <p className="mt-0.5 text-xs text-green-700">
+                ±{Math.round(exactCorrect.tolerance * 100)}%
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {review.explanation && (
+        <div className="mt-4 rounded-md bg-muted/40 p-4 text-sm leading-relaxed">
+          <p className="whitespace-pre-wrap text-foreground/90">{review.explanation}</p>
+          {review.regulation_clause && (
+            <p className="mt-3 text-xs uppercase tracking-wide text-muted-foreground">
+              {review.regulation_clause}
+            </p>
+          )}
+        </div>
+      )}
+    </article>
+  );
 }
 
 function Center({ children }: { children: React.ReactNode }) {

@@ -28,6 +28,8 @@ export type ReviewResponse = {
   repetitions: number;
   interval_days: number;
   due_date: string;
+  explanation: string | null;
+  regulation_clause: string | null;
 };
 
 export type TopicReadiness = {

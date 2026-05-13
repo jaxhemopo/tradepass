@@ -49,6 +49,10 @@ class ReviewResponse(BaseModel):
     repetitions: int
     interval_days: int
     due_date: datetime
+    # End-of-session recap renders these for missed questions; in-session
+    # reveal deliberately ignores them to keep testing free of spoilers.
+    explanation: str | None = None
+    regulation_clause: str | None = None
 
 
 class TopicReadiness(BaseModel):
