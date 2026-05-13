@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -26,7 +26,7 @@ class StudyQuestion(BaseModel):
 
 class StartSessionRequest(BaseModel):
     mode: str = Field(default="study", pattern="^(study|mock_exam|diagnostic)$")
-    limit: int = Field(default=10, ge=1, le=50)
+    limit: int = Field(default=10, ge=1, le=10)
 
 
 class StartSessionResponse(BaseModel):
@@ -37,19 +37,12 @@ class StartSessionResponse(BaseModel):
 class ReviewRequest(BaseModel):
     question_id: str
     session_id: str | None = None
-    # Shape varies by question_type:
-    #   single_choice    -> str (option id, e.g. "a")
-    #   multiple_select  -> list[str] (option ids, e.g. ["a","c"])
-    #   exact_value      -> str (raw typed value, e.g. "11.5")
     picked_answer: str | list[str]
     rated_knew_it: bool
     time_taken_seconds: int = Field(ge=0, le=3600)
 
 
 class ReviewResponse(BaseModel):
-    # Shape varies by question_type — for the client to render the reveal:
-    #   single_choice / multiple_select -> list[str] (correct option ids)
-    #   exact_value                     -> dict {answers, unit, tolerance}
     correct_answer: Any
     answered_correct: bool
     quality: int
@@ -66,7 +59,28 @@ class TopicReadiness(BaseModel):
     mastery_percent: float
 
 
+class ReadinessHistoryPoint(BaseModel):
+    date: date
+    readiness_percent: float
+
+
 class ReadinessResponse(BaseModel):
     readiness_percent: float
     questions_due_now: int
+    reviewed_today: int
+    daily_goal: int
+    change_7d: float | None
+    history: list[ReadinessHistoryPoint]
     topics: list[TopicReadiness]
+
+
+class Profile(BaseModel):
+    user_id: str
+    email: str | None
+    display_name: str | None
+    daily_goal: int
+
+
+class ProfileUpdate(BaseModel):
+    daily_goal: int | None = Field(default=None, ge=5, le=50)
+    display_name: str | None = None

@@ -21,11 +21,14 @@ type Phase =
   | { kind: "revealed"; picked: Picked; review: ReviewResponse }
   | { kind: "done" };
 
+const FIRST_MULTI_FLAG = "tradepass.shown_multi_tooltip_v1";
+
 export default function StudyClient({ token }: { token: string }) {
   const [session, setSession] = useState<StartSessionResponse | null>(null);
   const [index, setIndex] = useState(0);
   const [correctCount, setCorrectCount] = useState(0);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+  const [showMultiTooltip, setShowMultiTooltip] = useState(false);
 
   // Per-question working state while answering. Reset on next().
   const [singlePick, setSinglePick] = useState<string | null>(null);
@@ -56,16 +59,34 @@ export default function StudyClient({ token }: { token: string }) {
     };
   }, [token]);
 
+  // First-time multi-select onboarding tooltip.
   const current = session?.questions[index] ?? null;
+  useEffect(() => {
+    if (!current || current.question_type !== "multiple_select") return;
+    if (phase.kind !== "answering") return;
+    try {
+      const seen = window.localStorage.getItem(FIRST_MULTI_FLAG);
+      if (!seen) setShowMultiTooltip(true);
+    } catch {
+      // localStorage blocked — silently skip
+    }
+  }, [current, phase.kind]);
 
-  // single_choice: clicking an option locks it in immediately.
+  function dismissMultiTooltip() {
+    setShowMultiTooltip(false);
+    try {
+      window.localStorage.setItem(FIRST_MULTI_FLAG, "1");
+    } catch {
+      // ignore
+    }
+  }
+
   function pickSingle(id: string) {
     if (phase.kind !== "answering" || !current) return;
     setSinglePick(id);
     setPhase({ kind: "rating", picked: id });
   }
 
-  // multiple_select: toggle, then user clicks Submit.
   function toggleMulti(id: string) {
     if (phase.kind !== "answering") return;
     setMultiPicks((prev) => {
@@ -81,7 +102,6 @@ export default function StudyClient({ token }: { token: string }) {
     setPhase({ kind: "rating", picked: Array.from(multiPicks) });
   }
 
-  // exact_value: typed input, then Submit.
   function submitExact() {
     if (phase.kind !== "answering" || !exactInput.trim()) return;
     setPhase({ kind: "rating", picked: exactInput.trim() });
@@ -148,18 +168,17 @@ export default function StudyClient({ token }: { token: string }) {
 
   return (
     <main className="flex min-h-screen flex-col items-center p-6">
-      <div className="flex w-full max-w-2xl flex-col gap-6">
+      <div className="flex w-full max-w-2xl flex-col gap-5">
         <header className="flex items-center justify-between text-sm text-muted-foreground">
           <span>
             Question {index + 1} of {session.questions.length}
-            <span className="ml-2 rounded bg-muted px-2 py-0.5 text-xs uppercase tracking-wide">
-              {labelFor(current.question_type)}
-            </span>
           </span>
           <Link href="/dashboard" className="underline">
             Exit
           </Link>
         </header>
+
+        <TypeBadge type={current.question_type} />
 
         <div className="rounded-lg border p-6">
           <p className="text-xs uppercase tracking-wide text-muted-foreground">
@@ -167,6 +186,10 @@ export default function StudyClient({ token }: { token: string }) {
           </p>
           <p className="mt-3 text-lg leading-snug">{current.body}</p>
         </div>
+
+        {current.question_type === "multiple_select" && (
+          <MultiInstructionBanner pulseFor={showMultiTooltip} onDismiss={dismissMultiTooltip} />
+        )}
 
         <QuestionBody
           question={current}
@@ -208,10 +231,63 @@ export default function StudyClient({ token }: { token: string }) {
   );
 }
 
-function labelFor(t: StudyQuestion["question_type"]): string {
-  if (t === "single_choice") return "single choice";
-  if (t === "multiple_select") return "select all that apply";
-  return "exact value";
+function TypeBadge({ type }: { type: StudyQuestion["question_type"] }) {
+  const { label, classes } = (() => {
+    if (type === "multiple_select")
+      return {
+        label: "Select all that apply",
+        classes: "bg-amber-100 text-amber-900 border-amber-300",
+      };
+    if (type === "exact_value")
+      return {
+        label: "Type the exact value",
+        classes: "bg-blue-100 text-blue-900 border-blue-300",
+      };
+    return {
+      label: "Single choice",
+      classes: "bg-muted text-muted-foreground border-muted-foreground/20",
+    };
+  })();
+  return (
+    <div
+      className={`inline-flex w-fit items-center rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${classes}`}
+    >
+      {label}
+    </div>
+  );
+}
+
+function MultiInstructionBanner({
+  pulseFor,
+  onDismiss,
+}: {
+  pulseFor: boolean;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="rounded-lg border-2 border-amber-300 bg-amber-50 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-amber-900">
+            ☑ Select <span className="underline">all</span> correct answers
+          </p>
+          <p className="mt-1 text-xs text-amber-900/80">
+            Usually 2 or 3. Tick each one, then hit Submit.
+          </p>
+        </div>
+        {pulseFor && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0 border-amber-300 bg-white"
+            onClick={onDismiss}
+          >
+            Got it
+          </Button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function QuestionBody({
@@ -254,8 +330,8 @@ function QuestionBody({
     );
   }
 
-  // single_choice + multiple_select share the option grid
   const isMulti = question.question_type === "multiple_select";
+
   return (
     <>
       <div className="flex flex-col gap-2">
@@ -285,21 +361,31 @@ function QuestionBody({
                     : showMissed
                       ? "border-green-300 bg-green-50/60"
                       : isPicked
-                        ? "border-foreground"
+                        ? "border-foreground border-2"
                         : disabled
                           ? ""
                           : "hover:bg-muted"
               }`}
             >
-              {isMulti && (
+              {isMulti ? (
                 <span
-                  className={`mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded border text-xs ${
+                  className={`mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border-2 text-sm font-bold ${
                     isPicked
                       ? "border-foreground bg-foreground text-background"
-                      : "border-muted-foreground/40"
+                      : "border-muted-foreground/60 bg-background"
                   }`}
+                  aria-hidden="true"
                 >
                   {isPicked ? "✓" : ""}
+                </span>
+              ) : (
+                <span
+                  className={`mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 ${
+                    isPicked ? "border-foreground" : "border-muted-foreground/40"
+                  }`}
+                  aria-hidden="true"
+                >
+                  {isPicked && <span className="h-3 w-3 rounded-full bg-foreground" />}
                 </span>
               )}
               <span className="flex-1">
@@ -313,7 +399,9 @@ function QuestionBody({
 
       {isMulti && phase.kind === "answering" && (
         <Button className="w-full" disabled={multiPicks.size === 0} onClick={onSubmitMulti}>
-          Submit {multiPicks.size > 0 ? `(${multiPicks.size} selected)` : ""}
+          {multiPicks.size === 0
+            ? "Tick all correct answers, then Submit"
+            : `Submit (${multiPicks.size} selected)`}
         </Button>
       )}
     </>

@@ -12,6 +12,9 @@ function required(name: string, value: string | undefined): string {
 
 export const env = {
   SUPABASE_URL: required("NEXT_PUBLIC_SUPABASE_URL", process.env.NEXT_PUBLIC_SUPABASE_URL),
-  SUPABASE_ANON_KEY: required("NEXT_PUBLIC_SUPABASE_ANON_KEY", process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
+  SUPABASE_ANON_KEY: required(
+    "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+  ),
   API_URL: process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001",
 };

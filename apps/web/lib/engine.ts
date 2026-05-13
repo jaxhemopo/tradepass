@@ -22,8 +22,6 @@ export type StartSessionResponse = {
 export type ExactValueAnswer = { answers: string[]; unit?: string; tolerance: number };
 
 export type ReviewResponse = {
-  // single_choice / multiple_select: string[]
-  // exact_value: ExactValueAnswer
   correct_answer: string[] | ExactValueAnswer;
   answered_correct: boolean;
   quality: number;
@@ -40,10 +38,26 @@ export type TopicReadiness = {
   mastery_percent: number;
 };
 
+export type ReadinessHistoryPoint = {
+  date: string;
+  readiness_percent: number;
+};
+
 export type ReadinessResponse = {
   readiness_percent: number;
   questions_due_now: number;
+  reviewed_today: number;
+  daily_goal: number;
+  change_7d: number | null;
+  history: ReadinessHistoryPoint[];
   topics: TopicReadiness[];
+};
+
+export type Profile = {
+  user_id: string;
+  email: string | null;
+  display_name: string | null;
+  daily_goal: number;
 };
 
 class EngineError extends Error {
@@ -84,9 +98,6 @@ export const engine = {
     body: {
       question_id: string;
       session_id?: string;
-      // single_choice: option id ("a")
-      // multiple_select: option ids (["a","c"])
-      // exact_value: raw typed value ("11.5")
       picked_answer: string | string[];
       rated_knew_it: boolean;
       time_taken_seconds: number;
@@ -102,5 +113,13 @@ export const engine = {
       token,
       method: "GET",
       cache: "no-store",
+    }),
+  getProfile: (token: string) =>
+    call<Profile>("/v1/profile", { token, method: "GET", cache: "no-store" }),
+  patchProfile: (token: string, body: { daily_goal?: number; display_name?: string }) =>
+    call<Profile>("/v1/profile", {
+      token,
+      method: "PATCH",
+      body: JSON.stringify(body),
     }),
 };

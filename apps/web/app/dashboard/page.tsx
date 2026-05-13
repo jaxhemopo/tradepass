@@ -1,14 +1,24 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { brand } from "@/brand.config";
+import { HelpPopover } from "@/components/help-popover";
+import { Sparkline } from "@/components/sparkline";
 import { Button } from "@/components/ui/button";
-import { engine, type ReadinessResponse } from "@/lib/engine";
+import { engine, type Profile, type ReadinessResponse } from "@/lib/engine";
 import { createClient } from "@/lib/supabase/server";
 import { signOut } from "./actions";
 
 async function loadReadiness(token: string): Promise<ReadinessResponse | null> {
   try {
     return await engine.getReadiness(token);
+  } catch {
+    return null;
+  }
+}
+
+async function loadProfile(token: string): Promise<Profile | null> {
+  try {
+    return await engine.getProfile(token);
   } catch {
     return null;
   }
@@ -24,8 +34,14 @@ export default async function DashboardPage() {
     redirect("/login");
   }
 
-  const readiness = await loadReadiness(session.access_token);
+  const [readiness, profile] = await Promise.all([
+    loadReadiness(session.access_token),
+    loadProfile(session.access_token),
+  ]);
   const headlinePct = readiness ? readiness.readiness_percent : null;
+  const dailyGoal = profile?.daily_goal ?? readiness?.daily_goal ?? 20;
+  const reviewedToday = readiness?.reviewed_today ?? 0;
+  const goalReached = reviewedToday >= dailyGoal;
 
   return (
     <main className="flex min-h-screen flex-col items-center p-8">
@@ -35,36 +51,96 @@ export default async function DashboardPage() {
             <h1 className="text-2xl font-semibold">{brand.name}</h1>
             <p className="text-sm text-muted-foreground">Signed in as {session.user.email}</p>
           </div>
-          <form action={signOut}>
-            <Button type="submit" variant="outline" size="sm">
-              Sign out
-            </Button>
-          </form>
+          <div className="flex items-center gap-2">
+            <Link href="/settings">
+              <Button variant="outline" size="sm">
+                Settings
+              </Button>
+            </Link>
+            <form action={signOut}>
+              <Button type="submit" variant="outline" size="sm">
+                Sign out
+              </Button>
+            </form>
+          </div>
         </header>
 
         <section className="rounded-lg border p-6">
-          <p className="text-sm text-muted-foreground">Exam Readiness</p>
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">Exam Readiness</p>
+            <HelpPopover label="How readiness works">
+              <p className="font-semibold">How readiness works</p>
+              <p className="mt-2 text-muted-foreground">
+                Each question has its own review timer. Nail it and the next review pushes further
+                out; struggle and it comes back tomorrow. Your readiness % is the weighted average
+                across topics — high-weight topics like AS/NZS 3000 count more.
+              </p>
+              <p className="mt-2 text-muted-foreground">
+                Aim for <span className="font-semibold text-foreground">80%+</span> before booking
+                the exam.
+              </p>
+            </HelpPopover>
+          </div>
+
           <p className="mt-2 text-5xl font-semibold tabular-nums">
             {headlinePct === null ? "—" : `${headlinePct}%`}
           </p>
-          {readiness && readiness.questions_due_now > 0 && (
-            <p className="mt-3 text-sm text-muted-foreground">
-              {readiness.questions_due_now}{" "}
-              {readiness.questions_due_now === 1 ? "question" : "questions"} due for review.
+
+          {readiness && readiness.change_7d !== null && (
+            <p className="mt-1 text-sm tabular-nums text-muted-foreground">
+              <span
+                className={
+                  readiness.change_7d > 0
+                    ? "text-green-600"
+                    : readiness.change_7d < 0
+                      ? "text-red-600"
+                      : ""
+                }
+              >
+                {readiness.change_7d > 0 ? "↑" : readiness.change_7d < 0 ? "↓" : "→"}{" "}
+                {readiness.change_7d > 0 ? "+" : ""}
+                {readiness.change_7d}
+              </span>{" "}
+              this week
             </p>
           )}
-          {readiness && readiness.questions_due_now === 0 && (
-            <p className="mt-3 text-sm text-muted-foreground">
-              All caught up. Ready for a fresh batch?
-            </p>
+
+          {readiness && readiness.history.length >= 2 && (
+            <div className="mt-3">
+              <Sparkline data={readiness.history.map((p) => p.readiness_percent)} />
+            </div>
           )}
+
+          {readiness && (
+            <div className="mt-4">
+              <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
+                <span>
+                  {reviewedToday} / {dailyGoal} reviewed today
+                </span>
+                {goalReached && (
+                  <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">
+                    ✓ Goal hit
+                  </span>
+                )}
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                <div
+                  className={`h-full ${goalReached ? "bg-green-500" : "bg-foreground/80"}`}
+                  style={{
+                    width: `${Math.min(100, (reviewedToday / Math.max(1, dailyGoal)) * 100)}%`,
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
           {readiness === null && (
             <p className="mt-3 text-sm text-red-600">
               Engine offline — start the API to see your score.
             </p>
           )}
           <Link href="/study" className="mt-6 block">
-            <Button className="w-full">Start studying</Button>
+            <Button className="w-full">{goalReached ? "Keep going" : "Start studying"}</Button>
           </Link>
         </section>
 

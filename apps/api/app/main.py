@@ -1,16 +1,11 @@
 """TradePass / SparkyPass engine — FastAPI app.
 
-Endpoints (all under /v1):
-    POST /sessions/start     — pick N due cards, return session id + questions
-    POST /reviews            — record an attempt, apply SM-2, return next due
-    GET  /readiness          — weighted exam readiness % across all topics
-
-All endpoints require an Authorization: Bearer <supabase-jwt> header.
-
-Handles three question_types:
-    single_choice    correct_answer=["a"],         options=[{id,text}]
-    multiple_select  correct_answer=["a","c"],     options=[{id,text}]
-    exact_value      correct_answer={answers,...}, options=NULL
+Endpoints (all under /v1, JWT-protected):
+    POST /sessions/start     — pick N due cards
+    POST /reviews            — record an attempt, apply SM-2
+    GET  /readiness          — weighted exam readiness + history + today progress
+    GET  /profile            — return user_profiles row (auto-creates if absent)
+    PATCH /profile           — update daily_goal / display_name
 """
 
 from __future__ import annotations
@@ -18,8 +13,9 @@ from __future__ import annotations
 import logging
 import secrets
 import traceback
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +26,9 @@ from .config import get_settings
 from .deps import AuthedUser, authed_user
 from .schemas import (
     Option,
+    Profile,
+    ProfileUpdate,
+    ReadinessHistoryPoint,
     ReadinessResponse,
     ReviewRequest,
     ReviewResponse,
@@ -44,8 +43,11 @@ logger = logging.getLogger("tradepass.engine")
 
 ADVANCED_TYPES = {"multiple_select", "exact_value"}
 ADVANCED_FLOOR_BY_MODE = {"study": 2, "mock_exam": 6, "diagnostic": 1}
+NZ_TZ = ZoneInfo("Pacific/Auckland")
+HISTORY_DAYS = 30
+DEFAULT_DAILY_GOAL = 20
 
-app = FastAPI(title="TradePass Engine", version="0.2.0")
+app = FastAPI(title="TradePass Engine", version="0.3.0")
 _settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
@@ -113,6 +115,24 @@ def _to_study_question(q: dict[str, Any]) -> StudyQuestion:
     )
 
 
+def _ensure_profile_row(sb: Any, user_id: str) -> dict:
+    existing = (
+        sb.table("user_profiles")
+        .select("id, display_name, daily_goal")
+        .eq("id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    if existing and existing.data:
+        return existing.data
+    inserted = (
+        sb.table("user_profiles")
+        .insert({"id": user_id, "daily_goal": DEFAULT_DAILY_GOAL})
+        .execute()
+    )
+    return inserted.data[0]
+
+
 # ---------------------------------------------------------------------------
 # Session start
 # ---------------------------------------------------------------------------
@@ -171,7 +191,6 @@ def start_session(
             .limit(max(gap * 4, gap))
             .execute()
         )
-        # Prefer cards the user hasn't seen yet, then any.
         unseen = [r for r in (adv_resp.data or []) if r["id"] not in seen_ids and not in_session(r["id"])]
         fallback = [r for r in (adv_resp.data or []) if r["id"] in seen_ids and not in_session(r["id"])]
         for row in unseen + fallback:
@@ -310,8 +329,42 @@ def get_readiness(user: AuthedUser = Depends(authed_user)) -> ReadinessResponse:
         .execute()
     )
     topics = topics_resp.data or []
+
+    profile_row = _ensure_profile_row(sb, user.id)
+    daily_goal = int(profile_row.get("daily_goal") or DEFAULT_DAILY_GOAL)
+
+    nz_today = datetime.now(NZ_TZ).date()
+    nz_today_start_utc = datetime.combine(nz_today, datetime.min.time(), NZ_TZ).astimezone(timezone.utc)
+    attempts_resp = (
+        sb.table("attempts")
+        .select("id", count="exact")
+        .eq("user_id", user.id)
+        .gte("created_at", nz_today_start_utc.isoformat())
+        .execute()
+    )
+    reviewed_today = attempts_resp.count if attempts_resp.count is not None else len(attempts_resp.data or [])
+
+    history_start = (nz_today - timedelta(days=HISTORY_DAYS - 1)).isoformat()
+    history_resp = (
+        sb.table("readiness_snapshots")
+        .select("date, readiness_percent")
+        .eq("user_id", user.id)
+        .gte("date", history_start)
+        .order("date")
+        .execute()
+    )
+    history_rows = history_resp.data or []
+
     if not topics:
-        return ReadinessResponse(readiness_percent=0.0, questions_due_now=0, topics=[])
+        return ReadinessResponse(
+            readiness_percent=0.0,
+            questions_due_now=0,
+            reviewed_today=reviewed_today,
+            daily_goal=daily_goal,
+            change_7d=None,
+            history=[],
+            topics=[],
+        )
 
     topic_id_to_meta = {t["id"]: t for t in topics}
 
@@ -333,11 +386,13 @@ def get_readiness(user: AuthedUser = Depends(authed_user)) -> ReadinessResponse:
     now = datetime.now(timezone.utc)
     reps_by_topic: dict[str, list[int]] = {tid: [] for tid in topic_id_to_meta}
     questions_due_now = 0
+    questions_seen = 0
     for row in state_resp.data or []:
         topic_id = question_to_topic.get(row["question_id"])
         if topic_id is None:
             continue
         reps_by_topic[topic_id].append(int(row["repetitions"]))
+        questions_seen += 1
         due = datetime.fromisoformat(row["due_date"].replace("Z", "+00:00"))
         if due <= now:
             questions_due_now += 1
@@ -356,8 +411,78 @@ def get_readiness(user: AuthedUser = Depends(authed_user)) -> ReadinessResponse:
         for t in sorted(topics, key=lambda t: (-int(t["weight"]), t["slug"]))
     ]
 
+    # Lazy snapshot for today (idempotent — overwrites if we already wrote one).
+    sb.table("readiness_snapshots").upsert({
+        "user_id": user.id,
+        "date": nz_today.isoformat(),
+        "readiness_percent": readiness,
+        "questions_seen": questions_seen,
+    }).execute()
+
+    history_map: dict[str, float] = {r["date"]: float(r["readiness_percent"]) for r in history_rows}
+    history_map[nz_today.isoformat()] = readiness
+    history_points = [
+        ReadinessHistoryPoint(date=date.fromisoformat(d), readiness_percent=v)
+        for d, v in sorted(history_map.items())
+    ]
+
+    change_7d: float | None = None
+    target_date = (nz_today - timedelta(days=7)).isoformat()
+    if target_date in history_map:
+        change_7d = round(readiness - history_map[target_date], 1)
+
     return ReadinessResponse(
         readiness_percent=readiness,
         questions_due_now=questions_due_now,
+        reviewed_today=reviewed_today,
+        daily_goal=daily_goal,
+        change_7d=change_7d,
+        history=history_points,
         topics=topic_readiness,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Profile
+# ---------------------------------------------------------------------------
+@app.get("/v1/profile", response_model=Profile)
+def get_profile(user: AuthedUser = Depends(authed_user)) -> Profile:
+    sb = user.client
+    row = _ensure_profile_row(sb, user.id)
+    return Profile(
+        user_id=user.id,
+        email=user.email,
+        display_name=row.get("display_name"),
+        daily_goal=int(row.get("daily_goal") or DEFAULT_DAILY_GOAL),
+    )
+
+
+@app.patch("/v1/profile", response_model=Profile)
+def patch_profile(
+    body: ProfileUpdate,
+    user: AuthedUser = Depends(authed_user),
+) -> Profile:
+    sb = user.client
+    _ensure_profile_row(sb, user.id)
+
+    updates: dict[str, Any] = {}
+    if body.daily_goal is not None:
+        updates["daily_goal"] = body.daily_goal
+    if body.display_name is not None:
+        updates["display_name"] = body.display_name.strip() or None
+    if not updates:
+        return get_profile(user)
+
+    resp = (
+        sb.table("user_profiles")
+        .update(updates)
+        .eq("id", user.id)
+        .execute()
+    )
+    row = resp.data[0] if resp.data else {}
+    return Profile(
+        user_id=user.id,
+        email=user.email,
+        display_name=row.get("display_name"),
+        daily_goal=int(row.get("daily_goal") or DEFAULT_DAILY_GOAL),
     )
