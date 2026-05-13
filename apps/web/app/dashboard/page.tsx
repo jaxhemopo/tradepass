@@ -133,6 +133,31 @@ export default async function DashboardPage() {
                 target={readiness.total_questions}
                 accent="default"
                 unit="cards"
+                help={
+                  <HelpPopover label="What mastered means">
+                    <p className="font-semibold">What &quot;mastered&quot; means</p>
+                    <p className="mt-2 text-muted-foreground">
+                      A card is mastered once you&apos;ve answered it correctly{" "}
+                      <span className="font-semibold text-foreground">
+                        3 times across spaced reviews
+                      </span>{" "}
+                      — meaning you still remember it after the engine waits days between showings.
+                    </p>
+                    <p className="mt-2 text-muted-foreground">
+                      So it&apos;s normal for this to read{" "}
+                      <span className="font-mono text-foreground">
+                        0 / {readiness.total_questions}
+                      </span>{" "}
+                      right after your first 20-card session. Tomorrow you&apos;ll see those cards
+                      again; pass them, and the next review pushes a week out. Three of those
+                      checkpoints in a row = mastered.
+                    </p>
+                    <p className="mt-2 text-muted-foreground">
+                      One wrong answer resets the streak — by design, so &quot;mastered&quot; really
+                      means <em>still know it in a month</em>.
+                    </p>
+                  </HelpPopover>
+                }
               />
             </div>
           )}

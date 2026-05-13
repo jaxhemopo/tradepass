@@ -7,6 +7,7 @@ export function ProgressMetric({
   unit,
   accent = "default",
   trailing,
+  help,
 }: {
   label: string;
   value: number;
@@ -14,6 +15,7 @@ export function ProgressMetric({
   unit?: string;
   accent?: Accent;
   trailing?: React.ReactNode;
+  help?: React.ReactNode;
 }) {
   const safeTarget = Math.max(1, target);
   const pct = Math.min(100, (value / safeTarget) * 100);
@@ -23,8 +25,9 @@ export function ProgressMetric({
   return (
     <div>
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        <span className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
           {label}
+          {help}
         </span>
         <span className="flex items-center gap-2 text-sm tabular-nums">
           <span>
