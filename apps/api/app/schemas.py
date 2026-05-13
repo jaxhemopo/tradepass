@@ -69,6 +69,8 @@ class ReadinessResponse(BaseModel):
     questions_due_now: int
     reviewed_today: int
     daily_goal: int
+    mastered_count: int
+    total_questions: int
     change_7d: float | None
     history: list[ReadinessHistoryPoint]
     topics: list[TopicReadiness]

@@ -146,19 +146,19 @@ def start_session(
     limit = body.limit
     floor = ADVANCED_FLOOR_BY_MODE.get(body.mode, 0)
 
+    # Fetch a wider pool of due cards so we can reserve slots by type.
     due_state = (
         sb.table("sm2_state")
         .select("question_id, due_date")
         .eq("user_id", user.id)
         .lte("due_date", now_iso)
         .order("due_date")
-        .limit(limit)
+        .limit(limit * 3)
         .execute()
     )
     due_question_ids = [row["question_id"] for row in (due_state.data or [])]
 
-    picked_ids: list[str] = []
-    picked_rows: list[dict] = []
+    due_questions: list[dict] = []
     if due_question_ids:
         q_resp = (
             sb.table("questions")
@@ -166,9 +166,8 @@ def start_session(
             .in_("id", due_question_ids)
             .execute()
         )
-        for row in q_resp.data or []:
-            picked_rows.append(row)
-            picked_ids.append(row["id"])
+        due_order = {qid: i for i, qid in enumerate(due_question_ids)}
+        due_questions = sorted(q_resp.data or [], key=lambda q: due_order.get(q["id"], 0))
 
     seen_resp = (
         sb.table("sm2_state")
@@ -178,29 +177,59 @@ def start_session(
     )
     seen_ids = {r["question_id"] for r in (seen_resp.data or [])}
 
-    def in_session(qid: str) -> bool:
-        return qid in picked_ids
+    # Compose the session with the advanced-types quota reserved up front.
+    advanced_due = [q for q in due_questions if q.get("question_type") in ADVANCED_TYPES]
+    basic_due = [q for q in due_questions if q.get("question_type") not in ADVANCED_TYPES]
 
-    advanced_count = sum(1 for r in picked_rows if r.get("question_type") in ADVANCED_TYPES)
-    if advanced_count < floor and len(picked_rows) < limit:
-        gap = min(floor - advanced_count, limit - len(picked_rows))
+    picked_rows: list[dict] = []
+    picked_ids: list[str] = []
+
+    for q in advanced_due[:floor]:
+        picked_rows.append(q)
+        picked_ids.append(q["id"])
+
+    for q in basic_due:
+        if len(picked_rows) >= limit:
+            break
+        picked_rows.append(q)
+        picked_ids.append(q["id"])
+
+    for q in advanced_due[floor:]:
+        if len(picked_rows) >= limit:
+            break
+        picked_rows.append(q)
+        picked_ids.append(q["id"])
+
+    def advanced_in_session() -> int:
+        return sum(1 for r in picked_rows if r.get("question_type") in ADVANCED_TYPES)
+
+    # Top up with unseen advanced cards if we still haven't hit the floor.
+    if advanced_in_session() < floor:
         adv_resp = (
             sb.table("questions")
             .select(QUESTION_SELECT)
             .in_("question_type", list(ADVANCED_TYPES))
-            .limit(max(gap * 4, gap))
+            .limit(floor * 6)
             .execute()
         )
-        unseen = [r for r in (adv_resp.data or []) if r["id"] not in seen_ids and not in_session(r["id"])]
-        fallback = [r for r in (adv_resp.data or []) if r["id"] in seen_ids and not in_session(r["id"])]
-        for row in unseen + fallback:
-            picked_rows.append(row)
-            picked_ids.append(row["id"])
+        existing = set(picked_ids)
+        unseen_adv = [
+            r for r in (adv_resp.data or []) if r["id"] not in seen_ids and r["id"] not in existing
+        ]
+        for q in unseen_adv:
+            if advanced_in_session() >= floor:
+                break
             if len(picked_rows) >= limit:
-                break
-            advanced_count += 1
-            if advanced_count >= floor:
-                break
+                # Drop the last basic card to make room for the advanced one.
+                for i in range(len(picked_rows) - 1, -1, -1):
+                    if picked_rows[i].get("question_type") not in ADVANCED_TYPES:
+                        removed = picked_rows.pop(i)
+                        picked_ids.remove(removed["id"])
+                        break
+                else:
+                    break  # nothing to displace
+            picked_rows.append(q)
+            picked_ids.append(q["id"])
 
     if len(picked_rows) < limit:
         gap = limit - len(picked_rows)
@@ -210,11 +239,13 @@ def start_session(
             .limit(gap * 4)
             .execute()
         )
+        existing = set(picked_ids)
         for row in new_resp.data or []:
-            if row["id"] in seen_ids or in_session(row["id"]):
+            if row["id"] in seen_ids or row["id"] in existing:
                 continue
             picked_rows.append(row)
             picked_ids.append(row["id"])
+            existing.add(row["id"])
             if len(picked_rows) >= limit:
                 break
 
@@ -355,12 +386,32 @@ def get_readiness(user: AuthedUser = Depends(authed_user)) -> ReadinessResponse:
     )
     history_rows = history_resp.data or []
 
+    total_q_resp = (
+        sb.table("questions")
+        .select("id", count="exact")
+        .limit(1)
+        .execute()
+    )
+    total_questions = total_q_resp.count or 0
+
+    mastered_resp = (
+        sb.table("sm2_state")
+        .select("question_id", count="exact")
+        .eq("user_id", user.id)
+        .gte("repetitions", sm2.TARGET_REPETITIONS)
+        .limit(1)
+        .execute()
+    )
+    mastered_count = mastered_resp.count or 0
+
     if not topics:
         return ReadinessResponse(
             readiness_percent=0.0,
             questions_due_now=0,
             reviewed_today=reviewed_today,
             daily_goal=daily_goal,
+            mastered_count=mastered_count,
+            total_questions=total_questions,
             change_7d=None,
             history=[],
             topics=[],
@@ -436,6 +487,8 @@ def get_readiness(user: AuthedUser = Depends(authed_user)) -> ReadinessResponse:
         questions_due_now=questions_due_now,
         reviewed_today=reviewed_today,
         daily_goal=daily_goal,
+        mastered_count=mastered_count,
+        total_questions=total_questions,
         change_7d=change_7d,
         history=history_points,
         topics=topic_readiness,

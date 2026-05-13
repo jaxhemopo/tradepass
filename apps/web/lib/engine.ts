@@ -48,6 +48,8 @@ export type ReadinessResponse = {
   questions_due_now: number;
   reviewed_today: number;
   daily_goal: number;
+  mastered_count: number;
+  total_questions: number;
   change_7d: number | null;
   history: ReadinessHistoryPoint[];
   topics: TopicReadiness[];

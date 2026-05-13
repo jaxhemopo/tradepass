@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { brand } from "@/brand.config";
 import { HelpPopover } from "@/components/help-popover";
+import { ProgressMetric } from "@/components/progress-metric";
 import { Sparkline } from "@/components/sparkline";
 import { Button } from "@/components/ui/button";
 import { engine, type Profile, type ReadinessResponse } from "@/lib/engine";
@@ -112,25 +113,27 @@ export default async function DashboardPage() {
           )}
 
           {readiness && (
-            <div className="mt-4">
-              <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
-                <span>
-                  {reviewedToday} / {dailyGoal} reviewed today
-                </span>
-                {goalReached && (
-                  <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">
-                    ✓ Goal hit
-                  </span>
-                )}
-              </div>
-              <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-                <div
-                  className={`h-full ${goalReached ? "bg-green-500" : "bg-foreground/80"}`}
-                  style={{
-                    width: `${Math.min(100, (reviewedToday / Math.max(1, dailyGoal)) * 100)}%`,
-                  }}
-                />
-              </div>
+            <div className="mt-5 space-y-4">
+              <ProgressMetric
+                label="Today"
+                value={reviewedToday}
+                target={dailyGoal}
+                accent={goalReached ? "success" : "default"}
+                trailing={
+                  goalReached ? (
+                    <span className="rounded-full bg-green-100 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-green-700">
+                      ✓ Daily Goal Hit
+                    </span>
+                  ) : null
+                }
+              />
+              <ProgressMetric
+                label="Mastered"
+                value={readiness.mastered_count}
+                target={readiness.total_questions}
+                accent="default"
+                unit="cards"
+              />
             </div>
           )}
 
@@ -145,7 +148,7 @@ export default async function DashboardPage() {
         </section>
 
         {readiness && readiness.topics.length > 0 && (
-          <section className="rounded-lg border">
+          <section className="rounded-lg border" id="topics">
             <h2 className="border-b p-4 text-sm font-semibold">By topic</h2>
             <ul>
               {readiness.topics.map((t) => (

@@ -21,6 +21,10 @@ from datetime import datetime, timedelta, timezone
 MIN_EASINESS = 1.3
 DEFAULT_EASINESS = 2.5
 
+# A question counts as mastered when correctly answered this many times in a
+# spaced succession. Used by readiness mastery and the "X / Y mastered" count.
+TARGET_REPETITIONS = 3
+
 # Wall-clock budget (seconds) we use to judge "fast" vs "slow" recall.
 FAST_THRESHOLD_S = 10
 SLOW_THRESHOLD_S = 30
@@ -96,7 +100,7 @@ def apply_review(prev: Sm2State, quality: int, now: datetime | None = None) -> S
     )
 
 
-def topic_mastery(repetitions_per_question: list[int], target_repetitions: int = 3) -> float:
+def topic_mastery(repetitions_per_question: list[int], target_repetitions: int = TARGET_REPETITIONS) -> float:
     """Per-topic mastery in [0, 1].
 
     A question is fully mastered once the learner has answered it correctly
