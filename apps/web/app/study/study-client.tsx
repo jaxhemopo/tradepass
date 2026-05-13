@@ -178,6 +178,7 @@ export default function StudyClient({ token }: { token: string }) {
     }
     return (
       <RecapView
+        token={token}
         total={session?.questions.length ?? 0}
         correctCount={correctCount}
         misses={misses}
@@ -538,10 +539,12 @@ function correctIdsFor(
 }
 
 function RecapView({
+  token,
   total,
   correctCount,
   misses,
 }: {
+  token: string;
   total: number;
   correctCount: number;
   misses: Miss[];
@@ -568,7 +571,7 @@ function RecapView({
 
         <div className="flex flex-col gap-4">
           {misses.map((miss, i) => (
-            <RecapCard key={miss.question.id} number={i + 1} miss={miss} />
+            <RecapCard key={miss.question.id} number={i + 1} miss={miss} token={token} />
           ))}
         </div>
 
@@ -580,7 +583,7 @@ function RecapView({
   );
 }
 
-function RecapCard({ number, miss }: { number: number; miss: Miss }) {
+function RecapCard({ number, miss, token }: { number: number; miss: Miss; token: string }) {
   const { question, picked, review } = miss;
   const isExact = question.question_type === "exact_value";
   const exactCorrect =
@@ -657,7 +660,104 @@ function RecapCard({ number, miss }: { number: number; miss: Miss }) {
           )}
         </div>
       )}
+
+      <ReportControl token={token} questionId={question.id} />
     </article>
+  );
+}
+
+type ReportReason = "contradiction" | "incorrect" | "unclear" | "other";
+
+const REPORT_REASONS: { value: ReportReason; label: string }[] = [
+  { value: "contradiction", label: "Explanation contradicts the marked answer" },
+  { value: "incorrect", label: "Marked answer or content looks factually wrong" },
+  { value: "unclear", label: "Wording is confusing or ambiguous" },
+  { value: "other", label: "Other issue" },
+];
+
+function ReportControl({ token, questionId }: { token: string; questionId: string }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState<ReportReason>("contradiction");
+  const [details, setDetails] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (submitted) {
+    return (
+      <p className="mt-4 text-xs text-muted-foreground">
+        ✓ Reported — thanks. We&apos;ll review and fix it.
+      </p>
+    );
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-4 text-xs text-muted-foreground underline-offset-2 hover:underline"
+      >
+        🚩 Report this question
+      </button>
+    );
+  }
+
+  async function submit() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await engine.reportQuestion(token, {
+        question_id: questionId,
+        reason,
+        details: details.trim() || undefined,
+      });
+      setSubmitted(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="mt-4 rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm">
+      <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">
+        Report this question
+      </p>
+      <div className="mt-2 flex flex-col gap-2">
+        <select
+          value={reason}
+          onChange={(e) => setReason(e.target.value as ReportReason)}
+          className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+          disabled={submitting}
+        >
+          {REPORT_REASONS.map((r) => (
+            <option key={r.value} value={r.value}>
+              {r.label}
+            </option>
+          ))}
+        </select>
+        <textarea
+          value={details}
+          onChange={(e) => setDetails(e.target.value)}
+          placeholder="Optional: what looks wrong?"
+          rows={2}
+          maxLength={2000}
+          disabled={submitting}
+          className="rounded-md border border-input bg-background p-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        />
+        <div className="flex items-center gap-2">
+          <Button size="sm" onClick={submit} disabled={submitting}>
+            {submitting ? "Sending…" : "Submit report"}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setOpen(false)} disabled={submitting}>
+            Cancel
+          </Button>
+          {error && <span className="text-xs text-red-600">{error}</span>}
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -126,4 +126,17 @@ export const engine = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  reportQuestion: (
+    token: string,
+    body: {
+      question_id: string;
+      reason: "contradiction" | "incorrect" | "unclear" | "other";
+      details?: string;
+    },
+  ) =>
+    call<{ id: string }>("/v1/reports", {
+      token,
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 };

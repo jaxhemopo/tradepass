@@ -90,3 +90,13 @@ class Profile(BaseModel):
 class ProfileUpdate(BaseModel):
     daily_goal: int | None = Field(default=None, ge=5, le=50)
     display_name: str | None = None
+
+
+class ReportRequest(BaseModel):
+    question_id: str
+    reason: str = Field(pattern="^(contradiction|incorrect|unclear|other)$")
+    details: str | None = Field(default=None, max_length=2000)
+
+
+class ReportResponse(BaseModel):
+    id: str

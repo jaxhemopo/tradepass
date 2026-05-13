@@ -30,6 +30,8 @@ from .schemas import (
     ProfileUpdate,
     ReadinessHistoryPoint,
     ReadinessResponse,
+    ReportRequest,
+    ReportResponse,
     ReviewRequest,
     ReviewResponse,
     StartSessionRequest,
@@ -512,6 +514,27 @@ def get_profile(user: AuthedUser = Depends(authed_user)) -> Profile:
         display_name=row.get("display_name"),
         daily_goal=int(row.get("daily_goal") or DEFAULT_DAILY_GOAL),
     )
+
+
+@app.post("/v1/reports", response_model=ReportResponse, status_code=status.HTTP_201_CREATED)
+def post_report(
+    body: ReportRequest,
+    user: AuthedUser = Depends(authed_user),
+) -> ReportResponse:
+    """User-submitted content quality flag for a specific question."""
+    sb = user.client
+    resp = (
+        sb.table("question_reports")
+        .insert({
+            "user_id": user.id,
+            "question_id": body.question_id,
+            "reason": body.reason,
+            "details": (body.details or "").strip() or None,
+        })
+        .execute()
+    )
+    row = resp.data[0] if resp.data else {}
+    return ReportResponse(id=str(row.get("id", "")))
 
 
 @app.patch("/v1/profile", response_model=Profile)
